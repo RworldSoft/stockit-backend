@@ -1,0 +1,99 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+
+
+enum UserRole {
+  OWNER
+  SALE_OPERATOR
+  STORE_MANAGER
+}
+
+model User {
+  id               String    @id @default(auto()) @map("_id") @db.ObjectId
+
+  full_name        String?
+  email            String?   @unique
+  phone            String?   @unique
+  password         String?
+  hashedRt         String?
+
+  userRole         UserRole  @default(OWNER)
+
+  loginProvider    LoginProvider @default(OTP)
+
+  isVerifiedEmail  Boolean   @default(false)
+  isVerifiedPhone  Boolean   @default(false)
+  isActive         Boolean   @default(true)
+  isFirstLogin     Boolean   @default(true)
+
+  onboarded        Boolean   @default(false)
+  lastLogin        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  profile          Profile?
+}
+enum LoginProvider {
+  OTP
+  GOOGLE
+  PASSWORD
+}
+
+model Otp {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+
+  identifier String
+  otpHash    String
+  expiresAt  DateTime
+  attempts   Int      @default(0)
+  verified   Boolean  @default(false)
+
+  createdAt  DateTime @default(now())
+}
+
+
+
+model Profile {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+
+  userId           String   @unique @db.ObjectId
+  user             User     @relation(fields: [userId], references: [id])
+
+  profile_image    String?
+  background_image String?
+
+  business_type    String?
+  business_name    String?
+  gst_number       String?
+
+  location         Location?
+  currency         Currency?
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+type Location {
+  country  String?
+  city     String?
+  address  String?
+}
+
+type Currency {
+  currency_name String?
+  currency_code String?
+}
+
