@@ -12,6 +12,9 @@ import { SignupDto } from './dto/signup.dto';
 import { LoginDto } from './dto/login.dto';
 import { SendOtpDto } from './dto/send-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
+import { TokenUtil } from './utils/token.util';
+import { HashUtil } from './utils/hash.util';
+import { RefreshTokenDto } from './dto/refresh-token.dto';
 
 @Injectable()
 export class AuthService {
@@ -76,7 +79,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    return this.generateToken(user);
+    return this.generateTokens(user);
   }
 
   /* ================= SEND OTP ================= */
@@ -113,6 +116,7 @@ export class AuthService {
     console.log('OTP:', otp);
 
     return {
+      success: true,
       message: 'OTP sent successfully',
     };
   }
@@ -204,7 +208,7 @@ export class AuthService {
     }
 
     // 7️⃣ Generate JWT
-    return this.generateToken(user);
+    return this.generateTokens(user);
   }
 
   /* ================= HELPERS ================= */
@@ -213,35 +217,77 @@ export class AuthService {
     return Math.floor(100000 + Math.random() * 900000).toString();
   }
 
-  private async generateToken(user: any) {
+  private async generateTokens(user: any) {
+    const payload = {
+      sub: user.id,
+      role: user.userRole,
+      email: user.email,
+    };
+
+    const accessToken = TokenUtil.generateAccessToken(payload);
+
+    const refreshToken = TokenUtil.generateRefreshToken(payload);
+
+    const hashedRt = await HashUtil.hash(refreshToken);
+
+    // Save refresh token in DB
     await this.prisma.user.update({
       where: { id: user.id },
       data: {
+        hashedRt,
         lastLogin: new Date(),
         isFirstLogin: false,
       },
     });
 
-    const token = jwt.sign(
-      {
-        sub: user.id,
-        role: user.userRole,
-        email: user.email,
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' },
-    );
-
     return {
-      accessToken: token,
-      isOnboardingRequired: user.isFirstLogin,
+      accessToken,
+      refreshToken,
       user: {
         id: user.id,
         name: user.full_name,
         email: user.email,
         phone: user.phone,
         role: user.userRole,
+        onboarded: user.onboarded,
+        isFirstLogin: user.isFirstLogin,
       },
     };
+  }
+  async refreshToken(dto: RefreshTokenDto) {
+    const { refreshToken } = dto;
+
+    try {
+      const payload: any = jwt.verify(refreshToken, process.env.JWT_RT_SECRET);
+
+      const user = await this.prisma.user.findUnique({
+        where: { id: payload.sub },
+      });
+
+      if (!user || !user.hashedRt) {
+        throw new UnauthorizedException();
+      }
+
+      const match = await HashUtil.compare(refreshToken, user.hashedRt);
+
+      if (!match) {
+        throw new UnauthorizedException();
+      }
+
+      return this.generateTokens(user);
+    } catch (err) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+  }
+
+  async logout(userId: string) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        hashedRt: null,
+      },
+    });
+
+    return { message: 'Logged out successfully' };
   }
 }
