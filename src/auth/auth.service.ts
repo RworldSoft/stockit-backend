@@ -2,25 +2,28 @@ import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
+  InternalServerErrorException,
 } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
 import * as bcrypt from 'bcrypt';
-import * as jwt from 'jsonwebtoken';
-
 import { SignupDto } from './dto/signup.dto';
 import { LoginDto } from './dto/login.dto';
 import { SendOtpDto } from './dto/send-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
-import { TokenUtil } from './utils/token.util';
-import { HashUtil } from './utils/hash.util';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
+import { UserRole } from '@prisma/client';
+import { JwtPayload, Tokens } from './types';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class AuthService {
-  constructor(private prisma: PrismaService) {}
-
-  /* ================= SIGNUP (PASSWORD) ================= */
+  constructor(
+    private prisma: PrismaService,
+    private readonly jwtService: JwtService,
+    private readonly config: ConfigService,
+  ) {}
 
   async signup(dto: SignupDto) {
     const exists = await this.prisma.user.findFirst({
@@ -52,233 +55,189 @@ export class AuthService {
     };
   }
 
-  /* ================= LOGIN (PASSWORD) ================= */
-
   async login(dto: LoginDto) {
-    const user = await this.prisma.user.findFirst({
-      where: {
-        OR: [{ email: dto.identifier }, { phone: dto.identifier }],
-      },
-    });
+    try {
+      const { identifier, password } = dto;
 
-    if (!user) {
-      throw new UnauthorizedException('User not found');
-    }
+      const isEmail = identifier.includes('@');
 
-    if (!user.isActive) {
-      throw new UnauthorizedException('Account is disabled');
-    }
+      const user = await this.prisma.user.findFirst({
+        where: {
+          [isEmail ? 'email' : 'phone']: identifier,
+        },
+      });
+      if (!user || !user.password) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
 
-    if (!user.password) {
-      throw new BadRequestException('Login with OTP');
-    }
+      const isPasswordValid = await bcrypt.compare(password, user.password);
 
-    const match = await bcrypt.compare(dto.password, user.password);
+      if (!isPasswordValid) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
 
-    if (!match) {
+      return this.getTokens(user.id, identifier, user.userRole);
+    } catch (error) {
       throw new UnauthorizedException('Invalid credentials');
     }
-
-    return this.generateTokens(user);
   }
 
   /* ================= SEND OTP ================= */
 
   async sendOtp(dto: SendOtpDto) {
-    const { identifier } = dto;
+    try {
+      const { identifier } = dto;
 
-    if (!identifier) {
-      throw new BadRequestException('Email or phone required');
+      if (!identifier) {
+        throw new BadRequestException('Email or phone required');
+      }
+
+      const otp = this.generateOtp();
+
+      const hash = await bcrypt.hash(otp, 10);
+
+      const expires = new Date();
+      expires.setMinutes(expires.getMinutes() + 5);
+
+      await this.prisma.otp.deleteMany({
+        where: { identifier },
+      });
+
+      await this.prisma.otp.create({
+        data: {
+          identifier,
+          otpHash: hash,
+          expiresAt: expires,
+        },
+      });
+      console.log('OTP:', otp);
+
+      return {
+        message: 'OTP sent successfully',
+        otp,
+      };
+    } catch (error) {
+      console.error('Send OTP Error:', error);
+
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+
+      throw new InternalServerErrorException('Failed to send OTP');
     }
-
-    // Generate OTP
-    const otp = this.generateOtp();
-
-    const hash = await bcrypt.hash(otp, 10);
-
-    const expires = new Date();
-    expires.setMinutes(expires.getMinutes() + 5);
-
-    // Delete old OTPs
-    await this.prisma.otp.deleteMany({
-      where: { identifier },
-    });
-
-    await this.prisma.otp.create({
-      data: {
-        identifier,
-        otpHash: hash,
-        expiresAt: expires,
-      },
-    });
-
-    // TODO: Replace with SMS/Email Service
-    console.log('OTP:', otp);
-
-    return {
-      success: true,
-      message: 'OTP sent successfully',
-    };
   }
 
   /* ================= VERIFY OTP ================= */
 
   async verifyOtp(dto: VerifyOtpDto) {
-    const { identifier, otp } = dto;
+    try {
+      const { identifier, otp } = dto;
 
-    // 1️⃣ Find OTP record
-    const record = await this.prisma.otp.findFirst({
-      where: {
-        identifier,
-        verified: false,
-        expiresAt: { gt: new Date() },
-      },
-    });
+      const record = await this.prisma.otp.findFirst({
+        where: {
+          identifier,
+          verified: false,
+          expiresAt: { gt: new Date() },
+        },
+      });
 
-    if (!record) {
-      throw new UnauthorizedException('OTP expired');
-    }
+      if (!record) {
+        throw new UnauthorizedException('OTP expired');
+      }
 
-    if (record.attempts >= 5) {
-      throw new UnauthorizedException('Too many attempts');
-    }
+      if (record.attempts >= 5) {
+        throw new UnauthorizedException('Too many attempts');
+      }
 
-    // 2️⃣ Verify OTP
-    const valid = await bcrypt.compare(otp, record.otpHash);
+      const valid = await bcrypt.compare(otp, record.otpHash);
 
-    if (!valid) {
+      if (!valid) {
+        await this.prisma.otp.update({
+          where: { id: record.id },
+          data: {
+            attempts: { increment: 1 },
+          },
+        });
+
+        throw new UnauthorizedException('Invalid OTP');
+      }
+
       await this.prisma.otp.update({
         where: { id: record.id },
-        data: {
-          attempts: { increment: 1 },
+        data: { verified: true },
+      });
+
+      const isEmail = identifier.includes('@');
+
+      const existingUser = await this.prisma.user.findFirst({
+        where: {
+          OR: [
+            { email: isEmail ? identifier : undefined },
+            { phone: !isEmail ? identifier : undefined },
+          ],
         },
       });
 
-      throw new UnauthorizedException('Invalid OTP');
-    }
+      let user;
 
-    // 3️⃣ Mark OTP as verified
-    await this.prisma.otp.update({
-      where: { id: record.id },
-      data: { verified: true },
-    });
+      if (existingUser) {
+        user = await this.prisma.user.update({
+          where: { id: existingUser.id },
+          data: {
+            isVerifiedEmail: isEmail ? true : existingUser.isVerifiedEmail,
 
-    const isEmail = identifier.includes('@');
+            isVerifiedPhone: !isEmail ? true : existingUser.isVerifiedPhone,
 
-    // 4️⃣ Check if user already exists
-    const existingUser = await this.prisma.user.findFirst({
-      where: {
-        OR: [
-          { email: isEmail ? identifier : undefined },
-          { phone: !isEmail ? identifier : undefined },
-        ],
-      },
-    });
+            lastLogin: new Date(),
+          },
+        });
+      } else {
+        user = await this.prisma.user.create({
+          data: {
+            email: isEmail ? identifier : null,
+            phone: !isEmail ? identifier : null,
 
-    let user;
+            loginProvider: 'OTP',
 
-    // 5️⃣ If user exists → update
-    if (existingUser) {
-      user = await this.prisma.user.update({
-        where: { id: existingUser.id },
-        data: {
-          isVerifiedEmail: isEmail ? true : existingUser.isVerifiedEmail,
-          isVerifiedPhone: !isEmail ? true : existingUser.isVerifiedPhone,
-          lastLogin: new Date(),
-        },
-      });
-    }
+            isVerifiedEmail: isEmail,
+            isVerifiedPhone: !isEmail,
 
-    // 6️⃣ If user does not exist → create
-    else {
-      user = await this.prisma.user.create({
-        data: {
-          email: isEmail ? identifier : null,
-          phone: !isEmail ? identifier : null,
+            isFirstLogin: true,
+            isActive: true,
+          },
+        });
+      }
 
-          loginProvider: 'OTP',
-
-          isVerifiedEmail: isEmail,
-          isVerifiedPhone: !isEmail,
-
-          isFirstLogin: true,
-          isActive: true,
-        },
-      });
-    }
-
-    // 7️⃣ Generate JWT
-    return this.generateTokens(user);
-  }
-
-  /* ================= HELPERS ================= */
-
-  private generateOtp(): string {
-    return Math.floor(100000 + Math.random() * 900000).toString();
-  }
-
-  private async generateTokens(user: any) {
-    const payload = {
-      sub: user.id,
-      role: user.userRole,
-      email: user.email,
-    };
-
-    const accessToken = TokenUtil.generateAccessToken(payload);
-
-    const refreshToken = TokenUtil.generateRefreshToken(payload);
-
-    const hashedRt = await HashUtil.hash(refreshToken);
-
-    // Save refresh token in DB
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        hashedRt,
-        lastLogin: new Date(),
-        isFirstLogin: false,
-      },
-    });
-
-    return {
-      accessToken,
-      refreshToken,
-      user: {
+      const safeUser = {
         id: user.id,
-        name: user.full_name,
+        full_name: user.full_name,
         email: user.email,
         phone: user.phone,
         role: user.userRole,
-        onboarded: user.onboarded,
+        isVerifiedEmail: user.isVerifiedEmail,
+        isVerifiedPhone: user.isVerifiedPhone,
         isFirstLogin: user.isFirstLogin,
-      },
-    };
-  }
-  async refreshToken(dto: RefreshTokenDto) {
-    const { refreshToken } = dto;
+        onboarded: user.onboarded,
+      };
 
-    try {
-      const payload: any = jwt.verify(refreshToken, process.env.JWT_RT_SECRET);
+      const tokens = await this.getTokens(user.id, identifier, user.role);
 
-      const user = await this.prisma.user.findUnique({
-        where: { id: payload.sub },
-      });
+      return {
+        user: safeUser,
+        tokens,
+      };
+    } catch (error) {
+      console.error('Verify OTP Error:', error);
 
-      if (!user || !user.hashedRt) {
-        throw new UnauthorizedException();
+      if (error instanceof UnauthorizedException) {
+        throw error;
       }
 
-      const match = await HashUtil.compare(refreshToken, user.hashedRt);
-
-      if (!match) {
-        throw new UnauthorizedException();
-      }
-
-      return this.generateTokens(user);
-    } catch (err) {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new InternalServerErrorException('Something went wrong');
     }
   }
+
+  async refreshToken(dto: RefreshTokenDto) {}
 
   async logout(userId: string) {
     await this.prisma.user.update({
@@ -289,5 +248,37 @@ export class AuthService {
     });
 
     return { message: 'Logged out successfully' };
+  }
+
+  private generateOtp(): string {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+  }
+
+  // helpers
+  private async getTokens(
+    userId: string,
+    identification: string,
+    role: UserRole = UserRole.SALE_OPERATOR,
+  ): Promise<Tokens> {
+    const jwtPayload: JwtPayload = {
+      sub: userId,
+      identification: identification,
+      role: [role],
+    };
+    const [at, rt] = await Promise.all([
+      this.jwtService.signAsync(jwtPayload, {
+        secret: this.config.get<string>('AT_SECRET'),
+        expiresIn: 60 * 60 * 24 * 7,
+      }),
+      this.jwtService.signAsync(jwtPayload, {
+        secret: this.config.get<string>('RT_SECRET'),
+        expiresIn: 60 * 60 * 24 * 7,
+      }),
+    ]);
+
+    return {
+      access_token: at,
+      refresh_token: rt,
+    };
   }
 }

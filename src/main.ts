@@ -6,6 +6,8 @@ import { AppModule } from './app.module';
 import * as bodyParser from 'body-parser';
 import 'dotenv/config';
 import * as dotenv from 'dotenv';
+import { ResponseInterceptor } from '@common/interceptors/response.interceptor';
+import { AllExceptionsFilter } from '@common/filters/http-exception.filter';
 
 dotenv.config();
 
@@ -15,13 +17,22 @@ async function bootstrap() {
   const isProd = process.env.ENV === 'PROD';
   const port = isProd ? process.env.PROD_PORT : process.env.DEV_PORT;
 
-  const app = await NestFactory.create(AppModule, {
-    cors: true,
-  });
+  const app = await NestFactory.create(AppModule);
+
+  app.useGlobalInterceptors(new ResponseInterceptor());
+
+  app.useGlobalFilters(new AllExceptionsFilter());
+
+
+  // app.enableCors({
+  //   allowedOrigins: '*',
+  // });
 
   app.enableCors({
-    origin: true,
+    origin: ['http://localhost:3000'], // Frontend URL
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
   });
 
   app.use(bodyParser.urlencoded({ extended: false }));

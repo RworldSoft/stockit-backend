@@ -3,20 +3,23 @@ import { AuthService } from './auth.service';
 import { SignupDto } from './dto/signup.dto';
 import { LoginDto } from './dto/login.dto';
 
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { SendOtpDto } from './dto/send-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
-import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { Public } from '@common/decorators/public.decorator';
+import { GetCurrentUserId } from '@common/decorators/get-current-user-id.decorator';
 
 @ApiTags('Auth')
 @Controller({
   path: 'auth',
   version: '1',
 })
+@ApiBearerAuth()
 export class AuthController {
   constructor(private authService: AuthService) {}
 
+  @Public()
   @Post('signup')
   @ApiOperation({ summary: 'Register new user' })
   @ApiResponse({ status: 201, description: 'User registered successfully' })
@@ -25,6 +28,7 @@ export class AuthController {
     return this.authService.signup(dto);
   }
 
+  @Public()
   @Post('login')
   @ApiOperation({ summary: 'Login user' })
   @ApiResponse({ status: 200, description: 'Login successful' })
@@ -33,6 +37,7 @@ export class AuthController {
     return this.authService.login(dto);
   }
 
+  @Public()
   @Post('send-otp')
   @ApiOperation({ summary: 'Send OTP to user' })
   @ApiResponse({ status: 200, description: 'OTP sent successfully' })
@@ -41,6 +46,7 @@ export class AuthController {
     return this.authService.sendOtp(dto);
   }
 
+  @Public()
   @Post('verify-otp')
   @ApiOperation({ summary: 'Verify OTP' })
   @ApiResponse({ status: 200, description: 'OTP verified successfully' })
@@ -49,6 +55,7 @@ export class AuthController {
     return this.authService.verifyOtp(dto);
   }
 
+
   @Post('refresh')
   @ApiOperation({ summary: 'Refresh access token' })
   @ApiResponse({ status: 200, description: 'Token refreshed successfully' })
@@ -56,11 +63,12 @@ export class AuthController {
   refresh(@Body() dto: RefreshTokenDto) {
     return this.authService.refreshToken(dto);
   }
+  
+  
 
-  @UseGuards(JwtAuthGuard)
   @Post('logout')
   @ApiOperation({ summary: 'Logout user' })
-  logout(@Req() req) {
-    return this.authService.logout(req.user.sub);
+  logout(@GetCurrentUserId() userId: string) {
+    return this.authService.logout(userId);
   }
 }
